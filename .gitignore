@@ -1,0 +1,41 @@
+# dependencies
+node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+
+# next.js / build
+.next/
+out/
+build/
+dist/
+**/.next/
+**/dist/
+
+# expo / react-native (mobile)
+.expo/
+.expo-shared/
+**/.expo/
+
+# env
+.env
+.env.local
+.env*.local
+
+# vercel
+.vercel
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# misc / OS
+.DS_Store
+Thumbs.db
+.turbo
+*.tsbuildinfo
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,23 @@
+{
+  "name": "modamarket",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace apps/web",
+    "build:web": "npm run build --workspace apps/web",
+    "dev:mobile": "npm --prefix apps/mobile start",
+    "typecheck": "npm run typecheck --workspace packages/shared && npm run typecheck --workspace apps/api && npm run typecheck --workspace apps/web && npm --prefix apps/mobile run typecheck",
+    "typecheck:mobile": "npm --prefix apps/mobile run typecheck"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3"
+  }
+}

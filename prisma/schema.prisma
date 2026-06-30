@@ -1,0 +1,488 @@
+// Schemat bazy — MVP marketplace (moda)
+// Uwaga: środki użytkowników trzyma operator płatności (Tpay/P24).
+// Tu przechowujemy tylko REFERENCJE do transakcji i payoutów, nie same pieniądze.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------- UŻYTKOWNICY ----------
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum AccountType {
+  PRIVATE
+  BUSINESS
+}
+
+model User {
+  id           String      @id @default(cuid())
+  email        String      @unique
+  passwordHash String
+  role         Role        @default(USER)
+  accountType  AccountType @default(PRIVATE)
+
+  displayName  String
+  avatarUrl    String?
+  bio          String?
+  settings     Json?       // preferencje: powiadomienia / prywatność / język-waluta
+
+  // dane firmowe (tylko BUSINESS)
+  companyName  String?
+  nip          String?
+
+  ratingAvg    Float       @default(0)
+  ratingCount  Int         @default(0)
+  verified     Boolean     @default(false)
+
+  // potwierdzenie adresu e-mail (null = niepotwierdzony)
+  emailVerifiedAt DateTime?
+
+  // blokada konta przez administratora (null = aktywne)
+  bannedAt     DateTime?
+
+  // hash aktualnego refresh tokena (rotacja / unieważnianie sesji)
+  hashedRefreshToken String?
+
+  listings        Listing[]
+  ordersAsBuyer   Order[]        @relation("buyer")
+  ordersAsSeller  Order[]        @relation("seller")
+  messages        Message[]
+  reviewsWritten  Review[]       @relation("reviewAuthor")
+  reviewsReceived Review[]       @relation("reviewTarget")
+  favorites       Favorite[]
+  notifications   Notification[]
+  tokens          AuthToken[]
+  offersMade      Offer[]        @relation("offerBuyer")
+  offersReceived  Offer[]        @relation("offerSeller")
+  conversationsAsBuyer  Conversation[] @relation("convBuyer")
+  conversationsAsSeller Conversation[] @relation("convSeller")
+  reservationsAsBuyer   Reservation[]  @relation("resBuyer")
+  reservationsAsSeller  Reservation[]  @relation("resSeller")
+
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+}
+
+enum AuthTokenType {
+  PASSWORD_RESET
+  EMAIL_VERIFICATION
+}
+
+// Jednorazowe tokeny: reset hasła / weryfikacja e-mail.
+// Przechowujemy tylko hash (sha256) — surowy token trafia wyłącznie do maila.
+model AuthToken {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      AuthTokenType
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  @@index([userId, type])
+}
+
+// ---------- KATALOG ----------
+
+model Category {
+  id       String     @id @default(cuid())
+  name     String
+  slug     String     @unique
+  position Int        @default(0)
+  parentId String?
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  listings Listing[]
+}
+
+enum ListingStatus {
+  ACTIVE
+  RESERVED
+  SOLD
+  ARCHIVED
+}
+
+enum ItemCondition {
+  NEW
+  LIKE_NEW
+  VERY_GOOD
+  GOOD
+}
+
+model Listing {
+  id          String         @id @default(cuid())
+  sellerId    String
+  seller      User           @relation(fields: [sellerId], references: [id])
+
+  title       String
+  description String?
+  price       Int            // w groszach
+  currency    String         @default("PLN")
+
+  brand       String?
+  size        String?
+  material    String?         // np. Bawełna, Skóra, Poliester
+  color       String?         // może zawierać do 2 kolorów, np. "Beżowy, Czarny"
+  widthCm     Int?            // szerokość w cm
+  lengthCm    Int?            // długość w cm
+  condition   ItemCondition  @default(VERY_GOOD)
+  unisex      Boolean        @default(false) // przedmiot unisex
+
+  // konta firmowe: wiele identycznych sztuk + opcjonalna sprzedaż „Kup w grupie"
+  quantity      Int          @default(1)
+  groupBuy      Boolean      @default(false)
+  groupDiscount Int          @default(15) // % zniżki po osiągnięciu progu
+  groupMin      Int          @default(2)  // próg — min. osób uruchamiających zniżkę
+  groupMax      Int          @default(5)  // maks. osób w zbiórce
+
+  categoryId  String
+  category    Category       @relation(fields: [categoryId], references: [id])
+
+  status      ListingStatus  @default(ACTIVE)
+  verified    Boolean        @default(false) // "Zweryfikowane przez moderatora"
+  views       Int            @default(0)     // licznik odsłon (inkrement przy wejściu na produkt)
+  negotiable  Boolean        @default(true)  // czy kupujący może składać oferty cenowe
+
+  images      ListingImage[]
+  favorites   Favorite[]
+  orders      Order[]
+  offers      Offer[]
+  conversations Conversation[]
+  groupBuys   GroupBuy[]
+  reservations Reservation[]
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([categoryId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+model ListingImage {
+  id        String  @id @default(cuid())
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  url       String  // publiczny URL (bucket "listings")
+  path      String? // ścieżka w storage — do usuwania pliku
+  order     Int     @default(0)
+}
+
+model Favorite {
+  userId    String
+  listingId String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, listingId])
+}
+
+// ---------- TRANSAKCJE ----------
+
+enum OrderStatus {
+  PENDING      // utworzone, czeka na płatność
+  PAID         // operator potwierdził płatność (środki zablokowane)
+  SHIPPED      // sprzedający wysłał
+  DELIVERED    // dostarczone
+  COMPLETED    // środki zwolnione do sprzedającego
+  CANCELLED
+  REFUNDED
+  DISPUTED
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  listingId      String
+  listing        Listing     @relation(fields: [listingId], references: [id])
+  buyerId        String
+  buyer          User        @relation("buyer", fields: [buyerId], references: [id])
+  sellerId       String
+  seller         User        @relation("seller", fields: [sellerId], references: [id])
+
+  amount         Int         // cena produktu (grosze)
+  commission     Int         @default(0) // prowizja platformy
+  shippingFee    Int         @default(0)
+  status         OrderStatus @default(PENDING)
+
+  shippingMethod String?     // np. paczkomat
+  trackingNumber String?
+
+  payment        Payment?
+  dispute        Dispute?
+  review         Review[]
+
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+enum PaymentProvider {
+  TPAY
+  P24
+  AUTOPAY
+}
+
+enum PaymentStatus {
+  INITIATED
+  AUTHORIZED   // środki zablokowane u operatora
+  CAPTURED     // pobrane
+  PAID_OUT     // wypłacone sprzedającemu (payout)
+  REFUNDED
+  FAILED
+}
+
+// Referencja do operacji u operatora — NIE trzymamy tu środków.
+model Payment {
+  id             String          @id @default(cuid())
+  orderId        String          @unique
+  order          Order           @relation(fields: [orderId], references: [id])
+
+  provider       PaymentProvider
+  providerTxId   String?         // ID transakcji u operatora
+  providerPayout String?         // ID wypłaty u operatora
+  status         PaymentStatus   @default(INITIATED)
+  amount         Int
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+// ---------- KOMUNIKACJA ----------
+
+model Conversation {
+  id        String    @id @default(cuid())
+  buyerId   String
+  buyer     User      @relation("convBuyer", fields: [buyerId], references: [id])
+  sellerId  String
+  seller    User      @relation("convSeller", fields: [sellerId], references: [id])
+  listingId String?
+  listing   Listing?  @relation(fields: [listingId], references: [id])
+  messages  Message[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([buyerId, sellerId, listingId])
+}
+
+enum MessageType {
+  TEXT        // zwykła wiadomość
+  IMAGE       // załączone zdjęcie (bucket prywatny "messages", signed URL)
+  OFFER       // karta oferty cenowej (z akcjami)
+  RESERVATION // karta prośby o rezerwację (z akcjami akceptuj/odrzuć)
+  SYSTEM      // komunikat systemowy (np. "Oferta zaakceptowana")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User         @relation(fields: [senderId], references: [id])
+  body           String
+  type           MessageType  @default(TEXT)
+  imagePath      String?      // gdy type=IMAGE: ścieżka w buckecie "messages" (URL podpisywany przy odczycie)
+  offerId        String?      // gdy type=OFFER: powiązana oferta (karta w czacie)
+  offer          Offer?       @relation(fields: [offerId], references: [id])
+  reservationId  String?      // gdy type=RESERVATION: powiązana rezerwacja (karta w czacie)
+  reservation    Reservation? @relation(fields: [reservationId], references: [id])
+  readAt         DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+}
+
+// ---------- NEGOCJACJE CENY ----------
+
+enum OfferStatus {
+  PENDING    // czeka na decyzję drugiej strony
+  ACCEPTED   // zaakceptowana
+  REJECTED   // odrzucona
+  COUNTERED  // odrzucona kontrofertą (patrz wątek)
+  CANCELLED  // wycofana przez składającego
+  EXPIRED    // wygasła / zastąpiona nowszą
+}
+
+// Oferta cenowa kupującego do sprzedającego (z możliwością kontroferty).
+model Offer {
+  id           String      @id @default(cuid())
+  listingId    String
+  listing      Listing     @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  buyerId      String
+  buyer        User        @relation("offerBuyer", fields: [buyerId], references: [id])
+  sellerId     String
+  seller       User        @relation("offerSeller", fields: [sellerId], references: [id])
+
+  proposedById String      // kto złożył tę (kontr)ofertę: buyerId albo sellerId
+  amount       Int         // proponowana cena (grosze)
+  status       OfferStatus @default(PENDING)
+  message      String?
+
+  // wątek kontrofert (kontroferta wskazuje na ofertę, którą zastępuje)
+  parentId     String?
+  parent       Offer?      @relation("OfferThread", fields: [parentId], references: [id])
+  counters     Offer[]     @relation("OfferThread")
+  messages     Message[]
+
+  expiresAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([listingId])
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+// ---------- REZERWACJE ----------
+
+enum ReservationStatus {
+  PENDING    // czeka na decyzję sprzedającego
+  ACCEPTED   // zaakceptowana — przedmiot zarezerwowany na `hours`
+  REJECTED   // odrzucona
+  CANCELLED  // wycofana przez kupującego
+  EXPIRED    // minął czas rezerwacji
+}
+
+// Prośba o rezerwację przedmiotu na określony czas (24h / 48h / max 5 dni).
+model Reservation {
+  id         String            @id @default(cuid())
+  listingId  String
+  listing    Listing           @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  buyerId    String
+  buyer      User              @relation("resBuyer", fields: [buyerId], references: [id])
+  sellerId   String
+  seller     User              @relation("resSeller", fields: [sellerId], references: [id])
+
+  hours      Int               // wnioskowany okres w godzinach (24/48/72/120)
+  status     ReservationStatus @default(PENDING)
+  message    String?
+  expiresAt  DateTime?         // ustawiane przy akceptacji = now + hours
+  messages   Message[]
+
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @default(now()) @updatedAt
+
+  @@index([listingId])
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+// ---------- OPINIE / ZAUFANIE ----------
+
+enum ReviewSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+model Review {
+  id        String          @id @default(cuid())
+  orderId   String
+  order     Order           @relation(fields: [orderId], references: [id])
+  authorId  String
+  author    User            @relation("reviewAuthor", fields: [authorId], references: [id])
+  targetId  String
+  target    User            @relation("reviewTarget", fields: [targetId], references: [id])
+  rating    Int             // 1-5
+  sentiment ReviewSentiment @default(POSITIVE)
+  comment   String?
+  createdAt DateTime        @default(now())
+
+  @@unique([orderId, authorId]) // jedna ocena na osobę per transakcja
+  @@index([targetId])
+}
+
+// ---------- ZWROTY / SPORY ----------
+
+enum DisputeStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+model Dispute {
+  id         String        @id @default(cuid())
+  orderId    String        @unique
+  order      Order         @relation(fields: [orderId], references: [id])
+  openedById String
+  reason     String
+  status     DisputeStatus @default(OPEN)
+  resolution String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+}
+
+// ---------- POWIADOMIENIA ----------
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   // ORDER_PAID, MESSAGE, GROUP_BUY_FILLED, ...
+  payload   Json?
+  // klucz zwijania (anti-spam): kolejne zdarzenia tego samego typu i klucza,
+  // dopóki nieprzeczytane, aktualizują istniejące powiadomienie zamiast tworzyć nowe
+  dedupeKey String?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([userId])
+  @@index([userId, type, dedupeKey])
+}
+
+// ---------- "KUP W ZESPOLE" (szkielet — do doprecyzowania z klientem) ----------
+
+enum GroupBuyStatus {
+  FORMING      // grupa się zbiera
+  FILLED       // próg osiągnięty
+  COMPLETED    // rozliczone
+  EXPIRED      // nie zebrano w czasie -> zwroty
+  CANCELLED
+}
+
+// Jedna „zbiórka" na ogłoszeniu. Ogłoszenie z wieloma sztukami może mieć WIELE grup
+// (np. 20 szt., maks 5 osób → do 4 równoległych grup).
+model GroupBuy {
+  id           String                @id @default(cuid())
+  listingId    String
+  listing      Listing               @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  threshold    Int                   // próg — min. osób uruchamiających zniżkę
+  capacity     Int                   // maks. osób w tej grupie (≤ groupMax i ≤ dostępne sztuki)
+  discountPct  Int                   // zniżka snapshotowana z ogłoszenia
+  deadline     DateTime              // zbiórka ważna 24h
+  status       GroupBuyStatus        @default(FORMING)
+  participants GroupBuyParticipant[]
+  createdAt    DateTime              @default(now())
+
+  @@index([listingId])
+}
+
+model GroupBuyParticipant {
+  id          String   @id @default(cuid())
+  groupBuyId  String
+  groupBuy    GroupBuy @relation(fields: [groupBuyId], references: [id], onDelete: Cascade)
+  userId      String
+  // referencja do płatności u operatora (środki blokowane do czasu zebrania grupy)
+  paymentRef  String?
+  joinedAt    DateTime @default(now())
+
+  @@unique([groupBuyId, userId])
+}

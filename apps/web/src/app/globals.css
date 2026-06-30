@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    @apply bg-bg text-ink font-sans antialiased;
+    /* globalne skalowanie interfejsu */
+    zoom: 1.02;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-serif;
+  }
+}
+
+@layer components {
+  /* przycisk CTA w złotym gradiencie (z makiet) */
+  .btn-gold {
+    @apply bg-gold text-white font-semibold rounded-pill flex items-center justify-center gap-2;
+    background-image: linear-gradient(180deg, #c9a24b 0%, #b8862f 55%, #9c6f23 100%);
+  }
+  .btn-dark {
+    @apply bg-ink text-white font-semibold rounded-pill flex items-center justify-center gap-2;
+  }
+  .input-base {
+    @apply w-full bg-surface border border-line rounded-lg px-4 py-3 text-sm text-ink
+           outline-none placeholder:text-muted focus:border-gold transition-colors;
+  }
+  .card-surface {
+    @apply bg-surface border border-line rounded-lg;
+  }
+  /* ramka „telefonu" — podgląd ekranu mobilnego na web */
+  .phone-frame {
+    @apply mx-auto w-full max-w-phone bg-bg min-h-screen relative;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
